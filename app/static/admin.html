@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CTF 관리자</title>
+<style>
+*{box-sizing:border-box}body{font:16px system-ui,sans-serif;margin:0;background:#f3f5f8;color:#172235}main{max-width:1100px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}section{background:white;padding:24px;border:1px solid #dde3ed;border-radius:12px;margin:20px 0}h1{font-size:26px}h2{font-size:20px;margin-top:0}label{display:block;margin:12px 0}input,select,button{font:inherit;padding:9px;border:1px solid #a7b4c6;border-radius:6px;max-width:100%}input,select{background:white}button{background:#174ea6;color:white;cursor:pointer}button:disabled{opacity:.5;cursor:default}.secondary{background:white;color:#174ea6}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;white-space:nowrap}td,th{padding:12px 8px;text-align:left;border-bottom:1px solid #e1e6ee}td input{width:150px}p{line-height:1.6}.muted{color:#526178;font-size:14px}#message{position:sticky;top:0;background:#e5edfb;padding:12px;z-index:1;white-space:pre-wrap}#message:empty{display:none}[hidden]{display:none!important}form{margin:0}.danger{background:#9d2432}caption{text-align:left;padding:10px 0}
+</style>
+</head>
+<body><main>
+<header><h1>CTF 관리자</h1><button id="logout" class="secondary" hidden>로그아웃</button></header>
+<div id="message" role="status" aria-live="polite"></div>
+<section id="loginPanel"><h2>관리자 로그인</h2><form id="loginForm">
+<label>아이디 <input id="username" autocomplete="username" required></label>
+<label>비밀번호 <input id="password" type="password" autocomplete="current-password" required></label>
+<button>로그인</button></form></section>
+<div id="dashboard" hidden>
+<section><h2>대회 모드 · 점수표 예약</h2><form id="settingsForm">
+<label>대회 모드 <select id="mode"><option value="individual">개인전</option><option value="team">팀전</option></select></label>
+<p class="muted">팀전은 현재 활성 팀원들의 정답을 문제당 한 번만 합산합니다. 팀 배정·이동·정지 시 점수에 즉시 반영됩니다. 팀 미배정 회원은 팀전에서 정답을 제출할 수 없습니다.</p>
+<div class="row"><label>숨김 시작 <input id="hideFrom" type="datetime-local" step="1"></label><label>숨김 종료 <input id="hideUntil" type="datetime-local" step="1"></label></div>
+<p class="muted" id="timezone"></p><p class="muted">시작 시각부터 종료 직전까지 공개 점수표가 숨겨집니다. 양쪽 시간을 모두 비우고 저장하면 예약이 해제됩니다.</p>
+<div class="row"><button>설정 저장</button><button type="button" id="clearSchedule" class="secondary">예약 입력 비우기</button><span id="visibility"></span></div>
+</form></section>
+<section><h2>팀 관리</h2><form id="teamForm" class="row"><input id="teamName" aria-label="새 팀 이름" placeholder="새 팀 이름" maxlength="80" required><button>팀 만들기</button></form><div class="scroll"><table><thead><tr><th>팀 이름</th><th>인원</th><th>관리</th></tr></thead><tbody id="teams"></tbody></table></div></section>
+<section><h2>회원 관리</h2><form id="searchForm" class="row"><input id="search" aria-label="회원 검색" placeholder="아이디 또는 닉네임"><button>검색</button></form>
+<p class="muted">비밀번호는 변경할 때만 입력하세요. 계정 정지는 기존 로그인 토큰에도 적용됩니다.</p>
+<div class="scroll"><table><thead><tr><th>아이디 / 가입일</th><th>닉네임</th><th>팀</th><th>활성</th><th>새 비밀번호</th><th>관리</th></tr></thead><tbody id="users"></tbody></table></div>
+<div class="row"><button id="prev" class="secondary">이전</button><span id="pagination"></span><button id="next" class="secondary">다음</button></div></section>
+<section><h2>점수표 (관리자용)</h2><button id="refreshScores" class="secondary">새로고침</button><div class="scroll"><table><thead><tr><th>순위</th><th>참가자 / 팀</th><th>점수</th><th>해결 수</th></tr></thead><tbody id="scores"></tbody></table></div></section>
+</div></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let token='', page=1, teamList=[];
+function message(value){$('message').textContent=value;}
+function signOut(){token='';$('dashboard').hidden=true;$('logout').hidden=true;$('loginPanel').hidden=false;$('users').replaceChildren();$('scores').replaceChildren();}
+async function api(path,method='GET',body){
+ const response=await fetch('/api'+path,{method,cache:'no-store',headers:{...(token?{'Authorization':'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+ const result=await response.json();
+ if(!response.ok){if(response.status===401||response.status===403)signOut();throw new Error(typeof result.message==='string'?result.message:JSON.stringify(result.detail||result));}
+ return result.data;
+}
+function run(action){return async event=>{event?.preventDefault();message('');try{await action(event);}catch(error){message(error.message);}};}
+function cell(row,value){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=String(value??'');row.append(td);return td;}
+function input(value,label,type='text'){const el=document.createElement('input');el.type=type;el.value=value??'';el.setAttribute('aria-label',label);return el;}
+function button(label,action,kind='secondary'){const el=document.createElement('button');el.textContent=label;el.className=kind;el.onclick=run(async()=>{el.disabled=true;try{await action();}finally{el.disabled=false;}});return el;}
+function localTime(value){if(!value)return '';const date=new Date(value);return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,19);}
+async function loadSettings(){const values=await api('/settings');$('mode').value=values.competition_mode;$('hideFrom').value=localTime(values.scoreboard_hidden_from);$('hideUntil').value=localTime(values.scoreboard_hidden_until);$('visibility').textContent=values.scoreboard_hidden?'현재 점수표 숨김 중':'현재 점수표 공개 중';}
+async function loadTeams(){
+ teamList=await api('/admin/teams');$('teams').replaceChildren();
+ for(const team of teamList){const row=document.createElement('tr'),name=input(team.name,'팀 이름');name.maxLength=80;cell(row,name);cell(row,team.member_count);const actions=cell(row,'');
+ actions.append(button('이름 저장',async()=>{await api('/admin/teams/'+team.id,'PUT',{name:name.value});await loadTeams();await loadUsers();await loadScores();message('팀 이름을 저장했습니다.');}),document.createTextNode(' '),button('삭제',async()=>{if(!confirm('팀을 삭제하고 소속 회원의 팀 배정을 해제할까요?'))return;await api('/admin/teams/'+team.id,'DELETE');await loadTeams();await loadUsers();await loadScores();},'danger'));$('teams').append(row);}
+}
+async function loadUsers(){
+ const data=await api('/admin/users?page='+page+'&size=20&keyword='+encodeURIComponent($('search').value));$('users').replaceChildren();
+ for(const user of data.items){const row=document.createElement('tr');cell(row,user.username+' / '+String(user.created_at).slice(0,10));const nickname=input(user.nickname,'닉네임');nickname.maxLength=80;cell(row,nickname);
+ const team=document.createElement('select');team.setAttribute('aria-label','소속 팀');team.add(new Option('미배정',''));for(const item of teamList)team.add(new Option(item.name,item.id));team.value=user.team_id??'';cell(row,team);
+ const active=input('','계정 활성','checkbox');active.checked=Boolean(user.is_active);cell(row,active);const password=input('','새 비밀번호','password');password.autocomplete='new-password';cell(row,password);
+ cell(row,button('저장',async()=>{const body={nickname:nickname.value,is_active:active.checked,team_id:team.value?Number(team.value):null};if(password.value)body.password=password.value;await api('/admin/users/'+user.id,'PATCH',body);await loadTeams();await loadUsers();await loadScores();message('회원 정보를 저장했습니다.');}));$('users').append(row);}
+ if(!data.items.length){const row=document.createElement('tr');cell(row,'검색된 회원이 없습니다.').colSpan=6;$('users').append(row);}
+ $('pagination').textContent=page+' / '+Math.max(1,Math.ceil(data.total/20))+' · 총 '+data.total+'명';$('prev').disabled=page===1;$('next').disabled=page*20>=data.total;
+}
+async function loadScores(){const scores=await api('/admin/scoreboard');$('scores').replaceChildren();for(const score of scores){const row=document.createElement('tr');for(const value of [score.rank,score.nickname,score.total_score,score.solved_count])cell(row,value);$('scores').append(row);}}
+$('loginForm').onsubmit=run(async()=>{const data=await api('/auth/login','POST',{username:$('username').value,password:$('password').value});token=data.access_token;$('password').value='';await api('/auth/me');$('loginPanel').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;await loadSettings();await loadTeams();await loadUsers();await loadScores();});
+$('logout').onclick=()=>{signOut();message('로그아웃했습니다.');};
+$('settingsForm').onsubmit=run(async()=>{const start=$('hideFrom').value,end=$('hideUntil').value;if(Boolean(start)!==Boolean(end))throw new Error('시작과 종료 시간을 모두 입력하세요.');if(start&&new Date(start)>=new Date(end))throw new Error('종료 시간은 시작 시간보다 늦어야 합니다.');await api('/admin/settings','PUT',{competition_mode:$('mode').value,scoreboard_hidden_from:start?new Date(start).toISOString():null,scoreboard_hidden_until:end?new Date(end).toISOString():null});await loadSettings();await loadScores();message('설정을 저장했습니다.');});
+$('clearSchedule').onclick=()=>{$('hideFrom').value='';$('hideUntil').value='';message('설정 저장을 누르면 예약이 해제됩니다.');};
+$('teamForm').onsubmit=run(async()=>{await api('/admin/teams','POST',{name:$('teamName').value});$('teamName').value='';await loadTeams();await loadUsers();message('팀을 만들었습니다.');});
+$('searchForm').onsubmit=run(async()=>{page=1;await loadUsers();});$('prev').onclick=run(async()=>{page--;await loadUsers();});$('next').onclick=run(async()=>{page++;await loadUsers();});$('refreshScores').onclick=run(loadScores);
+$('timezone').textContent='시간 입력 기준: '+Intl.DateTimeFormat().resolvedOptions().timeZone+' (현재 브라우저 시간대)';
+</script></body></html>

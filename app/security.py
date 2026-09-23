@@ -96,11 +96,11 @@ def require_user(
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user = db.execute(
-        text("SELECT id, username, nickname FROM users WHERE id = :id"),
+        text("SELECT id, username, nickname, team_id, is_active FROM users WHERE id = :id"),
         {"id": user_id},
     ).mappings().first()
 
-    if not user:
+    if not user or not user["is_active"]:
         raise HTTPException(status_code=401, detail="User not found")
     return dict(user)
 
@@ -119,7 +119,9 @@ def optional_user(
     if not user_id:
         return None
     user = db.execute(
-        text("SELECT id, username, nickname FROM users WHERE id = :id"),
+        text("SELECT id, username, nickname, team_id, is_active FROM users WHERE id = :id"),
         {"id": user_id},
     ).mappings().first()
+    if user and not user["is_active"]:
+        raise HTTPException(status_code=403, detail="Account is disabled")
     return dict(user) if user else None

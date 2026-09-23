@@ -12,10 +12,19 @@ CREATE TABLE admins (
     updated_at DATETIME NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE teams (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(80) NOT NULL UNIQUE,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE users (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(50) NOT NULL UNIQUE,
     nickname VARCHAR(80) NOT NULL,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    team_id BIGINT UNSIGNED NULL,
+    CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL,
     password_hash VARCHAR(255) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
@@ -113,7 +122,6 @@ CREATE TABLE solves (
         REFERENCES users(id)
         ON DELETE SET NULL,
 
-    UNIQUE KEY uq_challenge_nickname (challenge_id, nickname),
     UNIQUE KEY uq_challenge_user (challenge_id, user_id),
     INDEX idx_user_id (user_id),
     INDEX idx_nickname (nickname),
@@ -130,5 +138,8 @@ CREATE TABLE settings (
 
 INSERT INTO settings (setting_key, setting_value) VALUES
 ('site_name', 'My CTF'),
-('flag_prefix', 'flag{')
+('flag_prefix', 'flag{'),
+('competition_mode', 'individual'),
+('scoreboard_hidden_from', NULL),
+('scoreboard_hidden_until', NULL)
 ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value);

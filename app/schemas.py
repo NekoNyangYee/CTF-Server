@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -78,3 +80,38 @@ class ScoreboardEntry(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     site_name: str | None = None
     flag_prefix: str | None = None
+    competition_mode: Literal["individual", "team"] | None = None
+    scoreboard_hidden_from: AwareDatetime | None = None
+    scoreboard_hidden_until: AwareDatetime | None = None
+
+
+class TeamRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Name must not be blank")
+        return value.strip()
+
+
+class UserUpdateRequest(BaseModel):
+    nickname: str | None = Field(default=None, min_length=1, max_length=80)
+    password: str | None = Field(default=None, min_length=1, max_length=72)
+    is_active: bool | None = None
+    team_id: int | None = Field(default=None, gt=0)
+
+    @field_validator("nickname")
+    @classmethod
+    def clean_nickname(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Nickname must not be blank")
+        return value.strip() if value is not None else None
+
+    @field_validator("password")
+    @classmethod
+    def password_bytes(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
+        return value

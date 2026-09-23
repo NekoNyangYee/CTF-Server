@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 from typing import Annotated, Any
@@ -10,6 +11,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.admin import router as admin_router, page_router
+from app.competition import read_settings, scoreboard_hidden, score_entries, validate_schedule, lock_competition, solved_for
 from app.config import settings
 from app.database import get_db
 from app.files import save_upload
@@ -34,6 +37,8 @@ from app.security import (
 )
 
 app = FastAPI(title=f"{settings.app_name} API", debug=settings.debug)
+app.include_router(admin_router)
+app.include_router(page_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -176,10 +181,10 @@ def register_user(payload: UserRegisterRequest, db: Session = Depends(get_db)) -
 @app.post("/api/users/login")
 def login_user(payload: LoginRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
     user = db.execute(
-        text("SELECT id, username, nickname, password_hash FROM users WHERE username = :username"),
+        text("SELECT id, username, nickname, password_hash, is_active FROM users WHERE username = :username"),
         {"username": payload.username},
     ).mappings().first()
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    if not user or not user["is_active"] or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token_data = {
@@ -198,12 +203,13 @@ def user_me(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
             "username": user["username"],
             "nickname": user["nickname"],
             "role": "user",
+            "team_id": user["team_id"],
         }
     )
 
 
 @app.get("/api/challenges")
-def list_public_challenges(db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_public_challenges(current_user: dict[str, Any] | None = Depends(optional_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     rows = db.execute(
         text("""
             SELECT c.id, c.title, c.slug, c.category, c.score,
@@ -216,8 +222,10 @@ def list_public_challenges(db: Session = Depends(get_db)) -> dict[str, Any]:
         """)
     ).mappings().all()
     items = [dict(row) for row in rows]
+    solved = solved_for(db, current_user, read_settings(db)["competition_mode"]) if current_user else {}
     for item in items:
         item["points"] = item["score"]
+        item["solved"] = item["id"] in solved
     return ok(items)
 
 
@@ -243,18 +251,14 @@ def get_public_challenge(
     item["files"] = fetch_files(db, item["id"], admin=False)
     item["solved"] = False
     item["solved_at"] = None
+    mode = read_settings(db)["competition_mode"]
     if current_user:
-        solved = db.execute(
-            text("""
-                SELECT solved_at
-                FROM solves
-                WHERE challenge_id = :challenge_id AND user_id = :user_id
-            """),
-            {"challenge_id": item["id"], "user_id": current_user["id"]},
-        ).mappings().first()
-        if solved:
-            item["solved"] = True
-            item["solved_at"] = solved["solved_at"]
+        solved = solved_for(db, current_user, mode)
+        item["solved"] = item["id"] in solved
+        item["solved_at"] = solved.get(item["id"])
+    item["can_submit"] = bool(current_user) and not item["solved"] and (
+        mode != "team" or bool(current_user.get("team_id"))
+    )
     return ok(item)
 
 
@@ -266,6 +270,14 @@ def submit_flag(
     current_user: dict[str, Any] = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    lock_competition(db)
+    current_user = dict(db.execute(text("SELECT id, username, nickname, team_id, is_active FROM users WHERE id = :id"),
+                                   {"id": current_user["id"]}).mappings().one())
+    if not current_user["is_active"]:
+        raise HTTPException(401, "사용이 중지된 계정입니다.")
+    mode = read_settings(db)["competition_mode"]
+    if mode == "team" and not current_user["team_id"]:
+        raise HTTPException(403, "팀 배정 후 정답을 제출할 수 있습니다. 관리자에게 문의하세요.")
     user_id = current_user["id"]
     nickname = (current_user["nickname"] or current_user["username"]).strip()
     flag = payload.flag.strip()
@@ -283,6 +295,8 @@ def submit_flag(
     if not challenge:
         raise HTTPException(status_code=404, detail="Challenge not found")
 
+    if challenge["id"] in solved_for(db, current_user, mode):
+        return ok({"correct": True, "already_solved": True, "solved": True, "message": "이미 푸셨습니다!"})
     correct = verify_flag(flag, challenge["flag_hash"])
     db.execute(
         text("""
@@ -305,7 +319,7 @@ def submit_flag(
     if correct:
         db.execute(
             text("""
-                INSERT IGNORE INTO solves (challenge_id, user_id, nickname)
+                INSERT INTO solves (challenge_id, user_id, nickname)
                 VALUES (:challenge_id, :user_id, :nickname)
             """),
             {"challenge_id": challenge["id"], "user_id": user_id, "nickname": nickname},
@@ -315,7 +329,7 @@ def submit_flag(
     return ok(
         {
             "correct": correct,
-            "message": "Correct!" if correct else "Wrong flag",
+            "message": "정답입니다!" if correct else "정답이 아닙니다.",
             "solved": correct,
         }
     )
@@ -342,34 +356,24 @@ def download_file(file_id: int, db: Session = Depends(get_db)) -> FileResponse:
 
 
 @app.get("/api/scoreboard")
-def scoreboard(db: Session = Depends(get_db)) -> dict[str, Any]:
-    rows = db.execute(
-        text("""
-            SELECT
-                s.user_id,
-                COALESCE(u.username, s.nickname) AS username,
-                COALESCE(u.nickname, s.nickname) AS nickname,
-                SUM(c.score) AS total_score,
-                COUNT(*) AS solved_count,
-                MAX(s.solved_at) AS last_solved_at
-            FROM solves s
-            JOIN challenges c ON s.challenge_id = c.id
-            LEFT JOIN users u ON s.user_id = u.id
-            WHERE c.is_public = 1
-            GROUP BY s.user_id, username, nickname
-            ORDER BY total_score DESC, last_solved_at ASC, nickname ASC
-        """)
-    ).mappings().all()
-    entries = [dict(row) for row in rows]
-    for index, entry in enumerate(entries, start=1):
-        entry["rank"] = index
-    return ok(entries)
+def scoreboard(db: Session = Depends(get_db)) -> JSONResponse:
+    values = read_settings(db)
+    headers = {"Cache-Control": "no-store"}
+    if scoreboard_hidden(values):
+        return JSONResponse(status_code=403, headers=headers, content={
+            "success": False, "message": "Scoreboard is temporarily hidden",
+            "hidden_until": values["scoreboard_hidden_until"],
+        })
+    from fastapi.encoders import jsonable_encoder
+    return JSONResponse(content=jsonable_encoder(ok(score_entries(db, values["competition_mode"]))),
+                        headers=headers)
 
 
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
-    rows = db.execute(text("SELECT setting_key, setting_value FROM settings")).mappings().all()
-    return ok({row["setting_key"]: row["setting_value"] for row in rows})
+    values = read_settings(db)
+    values["scoreboard_hidden"] = scoreboard_hidden(values)
+    return ok(values)
 
 
 @app.put("/api/admin/settings")
@@ -378,16 +382,20 @@ def update_settings(
     _: dict[str, Any] = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    values = payload.model_dump(exclude_none=True)
+    # Serialize concurrent settings changes so partial schedule edits remain valid.
+    lock_competition(db)
+    values = payload.model_dump(exclude_unset=True)
+    for key, value in list(values.items()):
+        if isinstance(value, datetime):
+            values[key] = value.astimezone(timezone.utc).isoformat()
+        elif value is None and key not in {"scoreboard_hidden_from", "scoreboard_hidden_until"}:
+            raise HTTPException(422, f"{key} may not be null")
+    validate_schedule({**read_settings(db), **values})
     for key, value in values.items():
-        db.execute(
-            text("""
-                INSERT INTO settings (setting_key, setting_value)
-                VALUES (:setting_key, :setting_value)
-                ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
-            """),
-            {"setting_key": key, "setting_value": value},
-        )
+        exists = db.execute(text("SELECT id FROM settings WHERE setting_key = :key"), {"key": key}).first()
+        statement = "UPDATE settings SET setting_value = :value WHERE setting_key = :key" if exists else \
+            "INSERT INTO settings (setting_key, setting_value) VALUES (:key, :value)"
+        db.execute(text(statement), {"key": key, "value": value})
     db.commit()
     return ok({"message": "updated"})
 
